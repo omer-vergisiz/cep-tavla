@@ -17,6 +17,11 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.InterfaceAddress;
 import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,11 +31,14 @@ import java.util.List;
 public class NetBridge {
     static final int WS_PORT = 8765;
     static final int UDP_PORT = 8766;
+    static final int HTTP_PORT = 8080;
     static final String BEACON = "CEPTAVLA|" + WS_PORT;
 
     private final Activity act;
     private final WebView web;
     private Relay relay;
+    private ServerSocket http;
+    private byte[] page;
     private volatile boolean beaconOn = false;
     private volatile boolean discOn = false;
     private DatagramSocket discSock;
@@ -49,6 +57,7 @@ public class NetBridge {
             relay = new Relay(WS_PORT);
             relay.setReuseAddr(true);
             relay.start();
+            startHttp();
             beaconOn = true;
             Thread t = new Thread(this::beaconLoop, "tavla-beacon");
             t.setDaemon(true);
@@ -62,6 +71,7 @@ public class NetBridge {
     @JavascriptInterface
     public synchronized void stopHost() {
         beaconOn = false;
+        if (http != null) { try { http.close(); } catch (Exception ignored) {} http = null; }
         if (relay != null) {
             try { relay.stop(300); } catch (Exception ignored) {}
             relay = null;
@@ -101,6 +111,63 @@ public class NetBridge {
             out.add(InetAddress.getByName("255.255.255.255"));
         } catch (Exception ignored) {}
         return out;
+    }
+
+    // ---------- iPhone ve tarayıcılar için oyun sayfası ----------
+    private void startHttp() throws Exception {
+        if (page == null) {
+            InputStream in = act.getAssets().open("index.html");
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            byte[] b = new byte[8192]; int n;
+            while ((n = in.read(b)) > 0) bo.write(b, 0, n);
+            in.close();
+            page = bo.toByteArray();
+        }
+        ServerSocket ss = new ServerSocket();
+        ss.setReuseAddress(true);
+        ss.bind(new InetSocketAddress(HTTP_PORT));
+        http = ss;
+        Thread t = new Thread(() -> {
+            while (!ss.isClosed()) {
+                try {
+                    final Socket c = ss.accept();
+                    Thread h = new Thread(() -> serve(c));
+                    h.setDaemon(true);
+                    h.start();
+                } catch (Exception e) { if (ss.isClosed()) break; }
+            }
+        }, "tavla-http");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void serve(Socket c) {
+        try {
+            c.setSoTimeout(5000);
+            InputStream in = c.getInputStream();
+            StringBuilder req = new StringBuilder();
+            int ch, last4 = 0;
+            while ((ch = in.read()) != -1 && req.length() < 8192) {
+                req.append((char) ch);
+                last4 = (last4 << 8 | ch) & 0xFFFFFFFF;
+                if (last4 == 0x0D0A0D0A) break;
+            }
+            String line = req.toString().split("\r\n", 2)[0];
+            String path = line.split(" ").length > 1 ? line.split(" ")[1] : "/";
+            OutputStream out = c.getOutputStream();
+            if (path.equals("/") || path.startsWith("/index.html") || path.startsWith("/?")) {
+                String head = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + page.length
+                        + "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+                out.write(head.getBytes(StandardCharsets.US_ASCII));
+                out.write(page);
+            } else {
+                out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+            }
+            out.flush();
+        } catch (Exception ignored) {
+        } finally {
+            try { c.close(); } catch (Exception ignored) {}
+        }
     }
 
     // ---------- katılan ----------
@@ -159,12 +226,20 @@ public class NetBridge {
         StringBuilder sb = new StringBuilder("[");
         try {
             List<String> ips = new ArrayList<>();
+            List<Integer> pr = new ArrayList<>();
             for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 if (!ni.isUp() || ni.isLoopback()) continue;
                 String name = ni.getName();
-                if (name.startsWith("rmnet") || name.startsWith("dummy") || name.startsWith("tun")) continue;
+                if (name.startsWith("rmnet") || name.startsWith("dummy") || name.startsWith("tun") || name.startsWith("ccmni")) continue;
+                int p = (name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("softap")) ? 0 : name.startsWith("wlan") ? 1 : 2;
                 for (InetAddress a : Collections.list(ni.getInetAddresses())) {
-                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) ips.add(a.getHostAddress());
+                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
+                        String ip = a.getHostAddress();
+                        int q = ip.startsWith("192.168.43.") ? 0 : p;
+                        int at = 0;
+                        while (at < pr.size() && pr.get(at) <= q) at++;
+                        ips.add(at, ip); pr.add(at, q);
+                    }
                 }
             }
             for (int i = 0; i < ips.size(); i++) {
