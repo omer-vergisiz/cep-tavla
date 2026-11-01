@@ -321,18 +321,23 @@ function firstMoves(s,p,dice){
   }
   return out;
 }
+// Son taşı toplayan hamle oyunu bitirir: kalan zarlar da kullanılmış sayılır.
+function depthAfter(s,p,m,dice){
+  const ns=apply(s,p,m),rest=without(dice,m.die);
+  return 1+(ns.off[p]===15?rest.length:maxDepth(ns,p,rest));
+}
 function maxDepth(s,p,dice){
   if(!dice.length)return 0;
   let best=0;
   for(const m of firstMoves(s,p,dice)){
-    const d=1+maxDepth(apply(s,p,m),p,without(dice,m.die));
+    const d=depthAfter(s,p,m,dice);
     if(d>best)best=d; if(best===dice.length)return best;
   }
   return best;
 }
 function legalMoves(s,p,dice){
   if(!dice.length)return [];
-  const scored=firstMoves(s,p,dice).map(m=>({m,d:1+maxDepth(apply(s,p,m),p,without(dice,m.die))}));
+  const scored=firstMoves(s,p,dice).map(m=>({m,d:depthAfter(s,p,m,dice)}));
   if(!scored.length)return [];
   const mx=Math.max(...scored.map(x=>x.d));
   let ok=scored.filter(x=>x.d===mx).map(x=>x.m);
@@ -377,7 +382,7 @@ function planTurn(s,p,dice,easy){
   while(frontier.length){
     let next=[];
     for(const nd of frontier){
-      const fm=nd.dice.length?firstMoves(nd.s,p,nd.dice):[];
+      const fm=(nd.dice.length&&nd.s.off[p]<15)?firstMoves(nd.s,p,nd.dice):[];
       if(!fm.length){finals.push(nd);continue;}
       for(const m of fm){
         const ns=apply(nd.s,p,m),dd=without(nd.dice,m.die),k=posKey(ns)+'#'+dd.join('');
@@ -388,9 +393,10 @@ function planTurn(s,p,dice,easy){
     if(next.length>500){next.forEach(n=>n.v=evalPos(n.s,p));next.sort((a,b)=>b.v-a.v);next=next.slice(0,500);}
     frontier=next;
   }
-  const mx=Math.max(0,...finals.map(f=>f.moves.length));
+  const len=f=>f.s.off[p]===15?dice.length:f.moves.length;
+  const mx=Math.max(0,...finals.map(len));
   if(!mx)return [];
-  let c=finals.filter(f=>f.moves.length===mx);
+  let c=finals.filter(f=>len(f)===mx);
   if(mx===1&&dice.length===2&&dice[0]!==dice[1]){const big=Math.max(...c.map(f=>f.moves[0].die));c=c.filter(f=>f.moves[0].die===big);}
   let best=c[0],bv=-1e9;
   for(const f of c){let v=evalPos(f.s,p); if(easy)v=v*.35+Math.random()*14; if(v>bv){bv=v;best=f;}}
